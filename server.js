@@ -3,15 +3,16 @@ import fetch from "node-fetch";
 import fs from "fs";
 import cors from "cors";
 
-app.use(cors());
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 10000;
+
+app.use(cors());
 
 const CACHE_FILE = "./cache.json";
 
 function loadCache() {
     if (!fs.existsSync(CACHE_FILE)) return {};
-    return JSON.parse(fs.readFileSync(CACHE_FILE));
+    return JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8"));
 }
 
 function saveCache(data) {
@@ -24,50 +25,55 @@ const API_BASE = "https://europe.albion-online-data.com/api/v2/stats/prices";
 
 app.get("/prices/:itemId", async (req, res) => {
     const itemId = req.params.itemId;
-    const locations = req.query.locations;
+    const locations = req.query.locations || "";
 
     try {
-        const url = `${API_BASE}/${itemId}.json?locations=${locations}`;
+        const url = `${API_BASE}/${itemId}.json?locations=${locations}&qualities=1`;
+
         const response = await fetch(url);
         const data = await response.json();
 
         let result = {};
 
-        data.forEach(i => {
-            if (!i.city) return;
+        if (Array.isArray(data)) {
+            data.forEach(i => {
+                if (!i.city) return;
 
-            const buy = i.sell_price_min || 0;
-            const sell = i.buy_price_max || 0;
+                const buyCost = i.sell_price_min || 0;
+                const sellRevenue = i.buy_price_max || 0;
 
-            if (!cache[itemId]) cache[itemId] = {};
+                if (!cache[itemId]) cache[itemId] = {};
 
-            // si hay datos buenos → actualizar cache
-            if (buy > 0 || sell > 0) {
-                cache[itemId][i.city] = {
-                    buy,
-                    sell,
-                    timestamp: Date.now()
+                // guardar cache si hay datos reales
+                if (buyCost > 0 || sellRevenue > 0) {
+                    cache[itemId][i.city] = {
+                        buyCost,
+                        sellRevenue,
+                        timestamp: Date.now()
+                    };
+                }
+
+                const fallback = cache[itemId]?.[i.city];
+
+                result[i.city] = {
+                    buyCost: buyCost || fallback?.buyCost || 0,
+                    sellRevenue: sellRevenue || fallback?.sellRevenue || 0
                 };
-            }
-
-            // si no hay datos → usar cache
-            const fallback = cache[itemId]?.[i.city];
-
-            result[i.city] = {
-                buy: buy || fallback?.buy || 0,
-                sell: sell || fallback?.sell || 0
-            };
-        });
+            });
+        }
 
         saveCache(cache);
 
         res.json(result);
 
     } catch (e) {
+        console.error("API error:", e);
+
+        // fallback cache si todo falla
         res.json(cache[itemId] || {});
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`Backend running on http://localhost:${PORT}`);
+    console.log(`Backend running on port ${PORT}`);
 });
