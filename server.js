@@ -4,96 +4,246 @@ import fs from "fs";
 import cors from "cors";
 
 const app = express();
+
 const PORT = process.env.PORT || 10000;
+
+// =======================================
+// CORS
+// =======================================
 
 app.use(cors({
     origin: "*",
-    methods: ["GET", "POST"],
+    methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type"]
 }));
 
 app.use((req, res, next) => {
+
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+
     next();
+
 });
+
+// =======================================
+// CACHE
+// =======================================
 
 const CACHE_FILE = "./cache.json";
 
 function loadCache() {
-    if (!fs.existsSync(CACHE_FILE)) return {};
-    return JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8"));
+
+    try {
+
+        if (!fs.existsSync(CACHE_FILE)) {
+            return {};
+        }
+
+        return JSON.parse(
+            fs.readFileSync(CACHE_FILE, "utf-8")
+        );
+
+    } catch (e) {
+
+        console.error("Cache load error:", e);
+        return {};
+
+    }
+
 }
 
 function saveCache(data) {
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2));
+
+    try {
+
+        fs.writeFileSync(
+            CACHE_FILE,
+            JSON.stringify(data, null, 2)
+        );
+
+    } catch (e) {
+
+        console.error("Cache save error:", e);
+
+    }
+
 }
 
 let cache = loadCache();
 
-const API_BASE = "https://europe.albion-online-data.com/api/v2/stats";
+// =======================================
+// API
+// =======================================
+
+// IMPORTANTE:
+// usar www y NO europe
+// porque devuelve más resultados
+
+const API_BASE =
+    "https://www.albion-online-data.com/api/v2/stats";
+
+// =======================================
+// HELPERS
+// =======================================
+
+function sanitizePrice(value) {
+
+    if (!value) return 0;
+
+    if (isNaN(value)) return 0;
+
+    return Number(value);
+
+}
+
+function getFallbackPrice(itemId, city, type) {
+
+    if (!cache[itemId]) return 0;
+
+    if (!cache[itemId][city]) return 0;
+
+    return cache[itemId][city][type] || 0;
+
+}
+
+// =======================================
+// ROOT
+// =======================================
 
 app.get("/", (req, res) => {
-    res.send("Albion backend running");
+
+    res.json({
+        status: "online",
+        service: "Albion Calculator Backend",
+        cacheItems: Object.keys(cache).length
+    });
+
 });
+
+// =======================================
+// PRECIOS
+// =======================================
 
 app.get("/prices/:itemId", async (req, res) => {
 
-    const itemId = req.params.itemId;
-    const locations = req.query.locations || "";
-
     try {
 
-        const url =
-            `${API_BASE}/prices/${itemId}.json?locations=${locations}&qualities=1`;
+        const itemId =
+            req.params.itemId;
 
-        const response = await fetch(url);
+        const locations =
+            req.query.locations || "";
+
+        const qualities =
+            req.query.qualities || "1";
+
+        const url =
+            `${API_BASE}/prices/${itemId}.json?locations=${locations}&qualities=${qualities}`;
+
+        console.log("Fetching:", url);
+
+        const response =
+            await fetch(url);
 
         if (!response.ok) {
-            console.error("Albion API error:", response.status);
-            return res.json({});
+
+            console.error(
+                "Albion API HTTP Error:",
+                response.status
+            );
+
+            return res.json(
+                cache[itemId] || {}
+            );
+
         }
 
-        const data = await response.json();
+        const text =
+            await response.text();
+
+        let data = [];
+
+        try {
+
+            data = JSON.parse(text);
+
+        } catch (e) {
+
+            console.error(
+                "JSON parse error:"
+            );
+
+            console.log(text);
+
+            return res.json(
+                cache[itemId] || {}
+            );
+
+        }
 
         let result = {};
 
         if (Array.isArray(data)) {
 
-            data.forEach(i => {
+            data.forEach(item => {
 
-                if (!i.city) return;
+                if (!item.city) return;
+
+                const city =
+                    item.city;
 
                 const buyCost =
-                    i.sell_price_min || 0;
+                    sanitizePrice(
+                        item.sell_price_min
+                    );
 
                 const sellRevenue =
-                    i.buy_price_max || 0;
+                    sanitizePrice(
+                        item.buy_price_max
+                    );
 
                 if (!cache[itemId]) {
                     cache[itemId] = {};
                 }
 
-                if (buyCost > 0 || sellRevenue > 0) {
+                // guardar en cache
+                if (
+                    buyCost > 0 ||
+                    sellRevenue > 0
+                ) {
 
-                    cache[itemId][i.city] = {
+                    cache[itemId][city] = {
+
                         buyCost,
                         sellRevenue,
-                        timestamp: Date.now()
+
+                        updatedAt:
+                            Date.now()
+
                     };
 
                 }
 
-                const fallback =
-                    cache[itemId]?.[i.city];
+                result[city] = {
 
-                result[i.city] = {
                     buyCost:
-                        buyCost || fallback?.buyCost || 0,
+                        buyCost ||
+                        getFallbackPrice(
+                            itemId,
+                            city,
+                            "buyCost"
+                        ),
 
                     sellRevenue:
-                        sellRevenue || fallback?.sellRevenue || 0
+                        sellRevenue ||
+                        getFallbackPrice(
+                            itemId,
+                            city,
+                            "sellRevenue"
+                        )
+
                 };
 
             });
@@ -106,29 +256,46 @@ app.get("/prices/:itemId", async (req, res) => {
 
     } catch (e) {
 
-        console.error("API error:", e);
+        console.error(
+            "Prices endpoint error:",
+            e
+        );
 
-        res.json(cache[itemId] || {});
+        res.json({});
 
     }
 
 });
 
-app.get("/history/:itemId", async (req, res) => {
+// =======================================
+// HISTORY
+// =======================================
 
-    const itemId = req.params.itemId;
+app.get("/history/:itemId", async (req, res) => {
 
     try {
 
-        const url =
-            `${API_BASE}/history/${itemId}.json?time-scale=24`;
+        const itemId =
+            req.params.itemId;
 
-        const response = await fetch(url);
+        const timeScale =
+            req.query.timescale || 24;
+
+        const locations =
+            req.query.locations || "";
+
+        const url =
+            `${API_BASE}/history/${itemId}.json?time-scale=${timeScale}&locations=${locations}`;
+
+        console.log("History:", url);
+
+        const response =
+            await fetch(url);
 
         if (!response.ok) {
 
             console.error(
-                "History API error:",
+                "History HTTP error:",
                 response.status
             );
 
@@ -136,13 +303,35 @@ app.get("/history/:itemId", async (req, res) => {
 
         }
 
-        const data = await response.json();
+        const text =
+            await response.text();
+
+        let data = [];
+
+        try {
+
+            data = JSON.parse(text);
+
+        } catch (e) {
+
+            console.error(
+                "History JSON parse error"
+            );
+
+            console.log(text);
+
+            return res.json([]);
+
+        }
 
         res.json(data);
 
     } catch (e) {
 
-        console.error("History error:", e);
+        console.error(
+            "History endpoint error:",
+            e
+        );
 
         res.json([]);
 
@@ -150,6 +339,44 @@ app.get("/history/:itemId", async (req, res) => {
 
 });
 
+// =======================================
+// CACHE VIEWER
+// =======================================
+
+app.get("/cache", (req, res) => {
+
+    res.json(cache);
+
+});
+
+// =======================================
+// CLEAR CACHE
+// =======================================
+
+app.get("/clear-cache", (req, res) => {
+
+    cache = {};
+
+    saveCache(cache);
+
+    res.json({
+        success: true
+    });
+
+});
+
+// =======================================
+// START
+// =======================================
+
 app.listen(PORT, () => {
-    console.log(`Backend running on port ${PORT}`);
+
+    console.log("");
+    console.log("=================================");
+    console.log(" Albion Backend Running");
+    console.log("=================================");
+    console.log(`PORT: ${PORT}`);
+    console.log("=================================");
+    console.log("");
+
 });
